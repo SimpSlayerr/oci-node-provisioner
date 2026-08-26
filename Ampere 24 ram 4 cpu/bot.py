@@ -1,82 +1,86 @@
-import oci
 import os
-import time
-from dotenv import load_dotenv
+import sys
+import oci
 
-load_dotenv()
-
-# Setup configuration from environment variables
-config = {
-    "user": os.getenv("OCI_USER_ID"),
-    "key_content": os.getenv("OCI_PRIVATE_KEY"),
-    "fingerprint": os.getenv("OCI_FINGERPRINT"),
-    "tenancy": os.getenv("OCI_TENANCY_ID"),
-    "region": os.getenv("OCI_REGION")
-}
-
-try:
-    compute_client = oci.core.ComputeClient(config)
-    print("OCI Authentication Successful. Initializing loop sequence...")
-except Exception as e:
-    print(f"Authentication Failed: {e}")
-    exit(1)
-
-# Execution parameters
-compartment_id = os.getenv("OCI_TENANCY_ID")
-subnet_id = os.getenv("OCI_SUBNET_ID")
-image_id = os.getenv("OCI_IMAGE_ID")
-public_ssh_key = os.getenv("OCI_PUBLIC_SSH_KEY") 
-
-# SAFETY CHECK: Verify the key actually loaded from GitHub Secrets
-if not public_ssh_key or public_ssh_key.strip() == "":
-    print("CRITICAL ERROR: OCI_PUBLIC_SSH_KEY is empty or missing from your secrets!")
-    exit(1)
-
-# Availability Domains to cycle through
-ads = ["uufj:PHX-AD-1", "uufj:PHX-AD-2", "uufj:PHX-AD-3"]
-
-total_attempts = 60 
-
-for i in range(1, total_attempts + 1):
-    current_ad = ads[(i - 1) % len(ads)]
-    print(f"[Attempt {i}/{total_attempts}] Requesting instance in {current_ad}...")
+def main():
+    user_id = os.environ.get("OCI_USER_ID", "").strip()
+    fingerprint = os.environ.get("OCI_FINGERPRINT", "").strip()
+    tenancy_id = os.environ.get("OCI_TENANCY_ID", "").strip()
+    region = os.environ.get("OCI_REGION", "eu-frankfurt-1").strip()
+    private_key = os.environ.get("OCI_KEY_CONTENT", "").strip()
     
+    ssh_public_key = os.environ.get("OCI_SSH_PUBLIC_KEY", "").strip()
+    subnet_id = os.environ.get("OCI_SUBNET_ID", "").strip()
+    image_id = os.environ.get("OCI_IMAGE_ID", "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaaimlbvu2dnd46l4gmgpcykuuqm6v52u67tqki7hxmptppe4wdhwea").strip()
+    
+    config = {
+        "user": user_id,
+        "fingerprint": fingerprint,
+        "tenancy": tenancy_id,
+        "region": region,
+        "key_content": private_key
+    }
+
     try:
-        request = oci.core.models.LaunchInstanceDetails(
-            display_name="FX-Backend-Server",
-            compartment_id=compartment_id,
-            availability_domain=current_ad,
-            shape="VM.Standard.A1.Flex",
-            shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
-                ocpus=4,
-                memory_in_gbs=24
-            ),
-            source_details=oci.core.models.InstanceSourceViaImageDetails(
-                source_type="image",
-                image_id=image_id,
-                boot_volume_size_in_gbs=100
-            ),
-            create_vnic_details=oci.core.models.CreateVnicDetails(
-                subnet_id=subnet_id,
-                assign_public_ip=True,
-                assign_private_dns_record=True,
-                display_name="forexalertsvnic"
-            ),
-            metadata={
-                "ssh_authorized_keys": str(public_ssh_key).strip()
-            }
-        )
-        
-        response = compute_client.launch_instance(request)
-        if response.status == 200:
-            print("SUCCESS! Authorized Server creation initialized perfectly.")
-            exit(0)
+        oci.config.validate_config(config)
+    except Exception as e:
+        print(f"Config Validation Error: {e}")
+        sys.exit(1)
+
+    identity_client = oci.identity.IdentityClient(config)
+    compute_client = oci.compute.ComputeClient(config)
+
+    try:
+        ads = identity_client.list_availability_domains(compartment_id=tenancy_id).data
+    except Exception as e:
+        print(f"Error fetching Availability Domains: {e}")
+        sys.exit(1)
+
+    fault_domains = ["FAULT-DOMAIN-1", "FAULT-DOMAIN-2", "FAULT-DOMAIN-3"]
+
+    print(f"Scanning {len(ads)} Availability Domains in {region} for ARM capacity (1 OCPU, 6GB RAM)...")
+
+    for ad in ads:
+        for fd in fault_domains:
+            print(f"Testing {ad.name} | {fd}...")
             
-    except oci.exceptions.ServiceError as e:
-        if "Out of host capacity" in str(e) or e.status == 500:
-            print(f"-> Capacity Unavailable. Resting 60 seconds...")
-        else:
-            print(f"-> API Error: {e.message}")
-            
-    if i < total_attempts:
-        time.sleep(60)
+            instance_details = oci.compute.models.LaunchInstanceDetails(
+                compartment_id=tenancy_id,
+                availability_domain=ad.name,
+                fault_domain=fd,
+                display_name="vless-proxy",
+                shape="VM.Standard.A1.Flex",
+                shape_config=oci.compute.models.LaunchInstanceShapeConfigDetails(
+                    ocpus=1.0,
+                    memory_in_gbs=6.0
+                ),
+                source_details=oci.compute.models.InstanceSourceViaImageDetails(
+                    image_id=image_id
+                ),
+                create_vnic_details=oci.compute.models.CreateVnicDetails(
+                    subnet_id=subnet_id,
+                    assign_public_ip=True
+                ),
+                metadata={
+                    "ssh_authorized_keys": ssh_public_key
+                }
+            )
+
+            try:
+                response = compute_client.launch_instance(instance_details)
+                if response.data.lifecycle_state in ["PROVISIONING", "RUNNING"]:
+                    print(f"🎉 SUCCESS! Instance provisioned in {ad.name} ({fd})!")
+                    print(f"Instance ID: {response.data.id}")
+                    sys.exit(0)
+            except oci.exceptions.ServiceError as e:
+                if "Out of host capacity" in str(e.message) or "TooManyRequests" in str(e.code) or e.status == 500:
+                    print(f"   -> Out of capacity in {ad.name} ({fd})")
+                else:
+                    print(f"   -> OCI Error: {e.message}")
+            except Exception as e:
+                print(f"   -> Unexpected error: {e}")
+
+    print("All domains full right now. Scheduled runner will retry in 10 minutes.")
+
+if __name__ == "__main__":
+    main()
