@@ -13,8 +13,8 @@ from oci.core.models import (
     CreateVnicDetails,
 )
 
-def get_fingerprint_from_pem(pem_str):
-    """Calculates MD5 fingerprint directly from private key PEM."""
+def get_key_details(pem_str):
+    """Derives MD5 fingerprint and PEM public key directly from private key."""
     try:
         key_obj = serialization.load_pem_private_key(
             pem_str.encode("utf-8"),
@@ -25,11 +25,17 @@ def get_fingerprint_from_pem(pem_str):
             encoding=serialization.Encoding.DER,
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
+        pub_pem = key_obj.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode("utf-8")
+        
         md5_digest = hashlib.md5(pub_der).hexdigest()
-        return ":".join(md5_digest[i:i+2] for i in range(0, len(md5_digest), 2))
+        fingerprint = ":".join(md5_digest[i:i+2] for i in range(0, len(md5_digest), 2))
+        return fingerprint, pub_pem
     except Exception as e:
-        print(f"Error calculating fingerprint from key: {e}")
-        return None
+        print(f"Error reading private key: {e}")
+        return None, None
 
 def main():
     user_id = os.environ.get("OCI_USER_ID", "").strip()
@@ -42,30 +48,13 @@ def main():
     subnet_id = os.environ.get("OCI_SUBNET_ID", "").strip()
     image_id = os.environ.get("OCI_IMAGE_ID", "ocid1.image.oc1.eu-frankfurt-1.aaaaaaaaimlbvu2dnd46l4gmgpcykuuqm6v52u67tqki7hxmptppe4wdhwea").strip()
 
-    # Normalize newlines (handles Windows \r\n and escaped \\n)
+    # Format linebreaks
     if "\\n" in raw_key and "\n" not in raw_key:
         raw_key = raw_key.replace("\\n", "\n")
     private_key = "\n".join([line.strip() for line in raw_key.splitlines() if line.strip()])
 
-    # Calculate true fingerprint from the private key
-    calc_fingerprint = get_fingerprint_from_pem(private_key)
+    calc_fingerprint, pub_key_pem = get_key_details(private_key)
     fingerprint = calc_fingerprint if calc_fingerprint else secret_fingerprint
-
-    print("=" * 50)
-    print("OCI AUTHENTICATION DIAGNOSTICS")
-    print(f"User OCID:          {user_id[:20]}...{user_id[-10:] if len(user_id) > 30 else ''}")
-    print(f"Tenancy OCID:       {tenancy_id[:20]}...{tenancy_id[-10:] if len(tenancy_id) > 30 else ''}")
-    print(f"Region:             {region}")
-    print(f"Key Fingerprint:    {fingerprint}")
-    if calc_fingerprint and secret_fingerprint and calc_fingerprint.lower() != secret_fingerprint.lower():
-        print(f"⚠️  NOTICE: GitHub secret fingerprint ({secret_fingerprint}) differed from key; using calculated: {calc_fingerprint}")
-    print("=" * 50)
-
-    # Basic format check
-    if not user_id.startswith("ocid1.user."):
-        print("⚠️ WARNING: OCI_USER_ID does not start with 'ocid1.user.' — check if you pasted the wrong OCID.")
-    if not tenancy_id.startswith("ocid1.tenancy."):
-        print("⚠️ WARNING: OCI_TENANCY_ID does not start with 'ocid1.tenancy.' — check if you pasted the wrong OCID.")
 
     config = {
         "user": user_id,
@@ -88,14 +77,21 @@ def main():
         ads = identity_client.list_availability_domains(compartment_id=tenancy_id).data
         print(f"✅ Authentication SUCCESS! Found {len(ads)} Availability Domains in {region}.")
     except Exception as e:
-        print(f"\n❌ AUTHENTICATION FAILED: {e}")
-        print("\nFix checklist:")
-        print(f"1. In Oracle Cloud Console -> My Profile -> API Keys, make sure fingerprint '{fingerprint}' exists.")
-        print("2. If it does not exist, upload the public key matching this private key to Oracle.")
+        print("\n" + "=" * 60)
+        print("❌ ORACLE DOES NOT RECOGNIZE THIS KEY YET")
+        print(f"Required Fingerprint: {fingerprint}")
+        print("=" * 60)
+        print("COPY THIS PUBLIC KEY BLOCK AND ADD IT TO ORACLE CLOUD:")
+        print(pub_key_pem.strip())
+        print("=" * 60)
+        print("Instructions:")
+        print("1. Go to Oracle Cloud -> My Profile -> API Keys -> Add API Key")
+        print("2. Choose 'Paste Public Key', paste the block above, and click 'Add'")
+        print("3. Re-run this GitHub workflow")
+        print("=" * 60 + "\n")
         sys.exit(1)
 
     fault_domains = ["FAULT-DOMAIN-1", "FAULT-DOMAIN-2", "FAULT-DOMAIN-3"]
-
     print(f"Scanning Availability Domains for ARM capacity (1 OCPU, 6GB RAM)...")
 
     for ad in ads:
