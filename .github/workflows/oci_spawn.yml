@@ -1,34 +1,33 @@
-name: Continuous OCI Python SDK Provisioner Loop
+name: "OCI ARM Instance Provisioner"
+
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'  # Runs every 5 minutes automatically
-  workflow_dispatch:       # Allows manual execution triggers
+    - cron: "*/10 * * * *"
 
 jobs:
-  attempt-build:
+  run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository code
+      - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Set up Python Environment
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install SDK Requirements
-        run: pip install -r requirements.txt
+      - name: Install OCI SDK
+        run: pip install oci
 
-      - name: Execute Python Provisioning Engine
+      - name: Execute Bot
         env:
-          PYTHONUNBUFFERED: "1"
           OCI_USER_ID: ${{ secrets.OCI_USER_ID }}
-          OCI_PRIVATE_KEY: ${{ secrets.OCI_PRIVATE_KEY }}
-          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_TENANCY_ID: ${{ secrets.OCI_TENANCY_ID }}
+          OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_REGION: ${{ secrets.OCI_REGION }}
+          OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
+          OCI_SSH_PUBLIC_KEY: ${{ secrets.OCI_SSH_PUBLIC_KEY }}
           OCI_SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           OCI_IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
-          # ADD THIS RUNNER MAPPING LINE RIGHT HERE:
-          OCI_PUBLIC_SSH_KEY: ${{ secrets.OCI_PUBLIC_SSH_KEY }} 
-        run: python "Ampere 24 ram 4 cpu/bot.py"
+        run: python bot.py
